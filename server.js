@@ -1,23 +1,45 @@
 import express from "express";
+import pkg from "pg";
 
+const { Pool } = pkg;
 const app = express();
+
 app.use(express.json());
 
-// ===============================
-// Admin protection middleware
-// ===============================
+/* ============================
+   DATABASE SETUP
+============================ */
+
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL not set");
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS kv_store (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL
+  );
+`);
+
+console.log("Database initialized");
+
+/* ============================
+   ADMIN AUTH MIDDLEWARE
+============================ */
+
 function requireAdmin(req, res, next) {
   const pass = req.header("x-admin-password");
 
-  // Hard fail if not configured in Railway
   if (!process.env.ADMIN_PASSWORD) {
-    return res.status(500).json({
-      ok: false,
-      error: "ADMIN_PASSWORD not set",
-    });
+    return res.status(500).json({ error: "ADMIN_PASSWORD not set" });
   }
 
-  // Reject missing or incorrect password
   if (!pass || pass !== process.env.ADMIN_PASSWORD) {
     return res.status(401).json({ ok: false });
   }
@@ -25,52 +47,54 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ===============================
-// Public routes (NO auth)
-// ===============================
-app.get("/", (req, res) => {
-  res.status(200).send("NPSL server is running ✅");
+/* ============================
+   HEALTH CHECK
+============================ */
+
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK");
 });
 
-// ===============================
-// Admin routes (PROTECTED)
-// ===============================
+/* ============================
+   READ DATA (PUBLIC)
+============================ */
 
-// Simple admin verification
-app.post("/admin/check", requireAdmin, (req, res) => {
+app.get("/data", async (req, res) => {
+  const result = await pool.query("SELECT key, value FROM kv_store");
+  const data = {};
+
+  for (const row of result.rows) {
+    data[row.key] = row.value;
+  }
+
+  res.json(data);
+});
+
+/* ============================
+   WRITE DATA (ADMIN ONLY)
+============================ */
+
+app.post("/admin/data", requireAdmin, async (req, res) => {
+  const entries = Object.entries(req.body);
+
+  for (const [key, value] of entries) {
+    await pool.query(
+      `INSERT INTO kv_store (key, value)
+       VALUES ($1, $2)
+       ON CONFLICT (key)
+       DO UPDATE SET value = EXCLUDED.value`,
+      [key, value]
+    );
+  }
+
   res.json({ ok: true });
 });
 
-// Example: reset league/season
-app.post("/admin/reset", requireAdmin, (req, res) => {
-  // TODO: real reset logic later
-  res.json({ ok: true, action: "reset" });
-});
+/* ============================
+   START SERVER
+============================ */
 
-// Example: update player points
-app.post("/admin/points", requireAdmin, (req, res) => {
-  const { player, points } = req.body || {};
-
-  if (!player || typeof points !== "number") {
-    return res.status(400).json({
-      ok: false,
-      error: "player and numeric points required",
-    });
-  }
-
-  // TODO: real points logic later
-  res.json({
-    ok: true,
-    player,
-    points,
-  });
-});
-
-// ===============================
-// Server
-// ===============================
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`NPSL server listening on port ${PORT}`);
 });
