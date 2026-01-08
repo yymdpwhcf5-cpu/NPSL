@@ -1,4 +1,4 @@
-const express = require("express");
+import express from "express";
 const app = express();
 
 // basic route so Railway has something to respond with
